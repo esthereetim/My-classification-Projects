@@ -1,0 +1,304 @@
+---
+title: "groupproject841"
+output: pdf_document
+date: "2025-11-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(pROC)    
+library(nnet)  
+library(glmnet)
+```
+
+```{r}
+gtzan_data <- read_csv("~/features_30_sec.csv")
+#str(gtzan_data)
+#table(gtzan_data$label)
+
+#make label a factor
+gtzan_data$label <- factor(gtzan_data$label)
+#gtzan_data$label
+
+#drop length, filename for PCA
+gtzan_nodrop <- c("filename", "length", "label")
+gtzan_nodrop <- intersect(gtzan_nodrop, names(gtzan_data))
+gtzan_drop <- setdiff(names(gtzan_data), gtzan_nodrop)
+
+gtzan_combo <- gtzan_data[, gtzan_drop]
+label_fact <- gtzan_data$label
+```
+
+PCA Data Reduction
+```{r}
+#scale gtzan_combo data
+gtzan_combo_scaled <- scale(gtzan_combo)
+
+#PCA with scaled gtzan 
+pca_gtzan <- prcomp(gtzan_combo_scaled, center = TRUE, scale. = FALSE)
+summary(pca_gtzan)
+
+eig_val <- pca_gtzan$sdev^2
+prop_var <- eig_val / sum(eig_val)
+cum_var  <- cumsum(prop_var)
+
+pca_summary <- data.frame(PC = paste0("PC", 1:length(pca_gtzan$sdev)), StdDev = pca_gtzan$sdev, VarExplained = (pca_gtzan$sdev^2) / sum(pca_gtzan$sdev^2), Cumulative = cumsum((pca_gtzan$sdev^2) / sum(pca_gtzan$sdev^2)))
+
+head(pca_summary, 33)
+```
+
+Plot Elbow Method
+```{r}
+qplot(x = 1:20, y = eig_val[1:20],
+      geom = c("line", "point")) + labs(x = "Principal Component", y = "variance", title = "PCA Plot") + theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#find smallest K
+k_95p <- which(cum_var >= 0.95)[1]
+k_95p
+
+#set k = 5
+k_elbow <- 5
+
+pc_scores <- as.data.frame(pca_gtzan$x)
+
+pc5_data <- pc_scores[, 1:k_elbow]
+pc5_data$label <- label_fact
+
+pc33_data <- pc_scores[, 1:k_95p]
+pc33_data$label <- label_fact
+
+full_df <- cbind(gtzan_combo, label = label_fact)
+```
+
+80/20 split of data, stratified over label
+```{r}
+set.seed(841)
+train_idx <- createDataPartition(label_fact, p = 0.8, list = FALSE)
+#train_idx
+
+train_full_df <- full_df[train_idx, ]
+test_full_df  <- full_df[-train_idx, ]
+x_train_full <- train_full_df[, !(names(train_full_df) %in% "label")]
+x_test_full  <- test_full_df[,  !(names(test_full_df)  %in% "label")]
+pp_full <- caret::preProcess(x_train_full, method = c("center", "scale"))
+
+x_train_full_sc <- predict(pp_full, x_train_full)
+x_test_full_sc  <- predict(pp_full, x_test_full)
+
+train_full_sc <- cbind(x_train_full_sc, label = train_full_df$label)
+test_full_sc  <- cbind(x_test_full_sc,  label = test_full_df$label)
+
+pc5_train <- pc5_data[train_idx, ]
+pc5_test <- pc5_data[-train_idx, ]
+
+pc33_train <- pc33_data[train_idx, ]
+pc33_test <- pc33_data[-train_idx, ]
+```
+
+Fit models & run predictions
+```{r}
+#logistic regression, use multinom for multiclass response not two class lr like glm
+#PC5 logistic regression
+x_train_pc5 <- model.matrix(label~.- 1, data = pc5_train)
+y_train_pc5 <- pc5_train$label
+
+m_pc5 <- cv.glmnet(x_train_pc5, y_train_pc5, type.measure = "class", family = "multinomial", nlambda = 20, nfolds = 5, alpha = 1)
+
+x_test_pc5 <- model.matrix(label ~ . - 1, data = pc5_test)
+y_test_pc5 <- pc5_test$label
+
+pred_pc5_class <- predict(m_pc5, newx = x_test_pc5, s = "lambda.min", type = "class")
+pred_pc5_prob  <- predict(m_pc5, newx = x_test_pc5, s = "lambda.min", type = "response")
+
+#PC33 logistic regression
+x_train_pc33 <- model.matrix(label~.- 1, data = pc33_train)
+y_train_pc33 <- pc33_train$label
+
+m_pc33 <- cv.glmnet(x_train_pc33, y_train_pc33, type.measure = "class", family = "multinomial", nlambda = 20, nfolds = 5, alpha = 1)
+
+x_test_pc33 <- model.matrix(label ~ . - 1, data = pc33_test)
+y_test_pc33 <- pc33_test$label
+
+pred_pc33_class <- predict(m_pc33, newx = x_test_pc33,
+                           s = "lambda.min", type = "class")
+pred_pc33_prob  <- predict(m_pc33, newx = x_test_pc33,
+                           s = "lambda.min", type = "response")
+
+#full df logistic regression
+x_train = model.matrix(label~.-1, data = train_full_sc)
+y_train = train_full_sc$label
+
+m <- cv.glmnet(x_train, y_train, type.measure = "class",
+               family = "multinomial", nlambda = 20, nfolds = 5, alpha = 1)
+
+coeff = coef(m,  s = "lambda.min")
+
+x_test = model.matrix(label~.-1, data = test_full_sc)
+y_test = test_full_sc$label
+
+pred = predict(m, newx = x_test, s = "lambda.min", type = "class")
+acc = mean(pred == y_test)
+
+pred_full_prob <- predict(m, newx = x_test, s = "lambda.min", type = "response")
+
+y_test_fac <- factor(y_test)
+pred_fac <- factor(pred, levels = levels(y_test_fac))
+
+```
+
+Testing Accuracy, Sensitivity, Specificity 
+```{r}
+multinom_metrics <- function(truth, pred_class) {
+  truth <- factor(truth)
+  pred_class <- factor(pred_class, levels = levels(truth))
+
+  c_matrix <- confusionMatrix(pred_class, truth)
+  accuracy <- c_matrix$overall["Accuracy"]
+  sensi_tivity <- c_matrix$byClass[, "Sensitivity"]
+  speci_ficity <- c_matrix$byClass[, "Specificity"]
+  
+  by_class <- data.frame(
+    genre = rownames(c_matrix$byClass),
+    sensitivity = sensi_tivity,
+    specificity = speci_ficity,
+    row.names = NULL)
+
+  list(accuracy = as.numeric(accuracy), by_class = by_class, macro_sens = mean(sensi_tivity, na.rm = TRUE), macro_spec = mean(speci_ficity, na.rm = TRUE))
+}
+
+metrics_pc5 <- multinom_metrics(y_test_pc5, pred_pc5_class)
+metrics_pc33 <- multinom_metrics(y_test_pc33, pred_pc33_class)
+metrics_full_glm <- multinom_metrics(y_test, pred)
+
+
+#ACCURACY
+print(paste("PC5 accuracy is", round(metrics_pc5$accuracy,2)))
+print(paste("PC33 accuracy is", round(metrics_pc33$accuracy,2)))
+print(paste("Full accuracy", round(metrics_full_glm$accuracy, 2)))
+
+#SENSITIVITY
+print(paste("PC5 sensitivity is", round(metrics_pc5$macro_sens, 2)))
+print(paste("PC33 sensitivity is",round(metrics_pc33$macro_sens, 2)))
+print(paste("Full sensitivity", round(metrics_full_glm$macro_sens, 2)))
+
+#SPECIFICITY
+print(paste("PC5 specificity is", round(metrics_pc5$macro_spec, 2)))
+print(paste("PC33 specificity is", round(metrics_pc33$macro_spec,2)))
+print(paste("Full specificity", round(metrics_full_glm$macro_spec, 2)))
+```
+
+
+```{r}
+#levels(pred)
+#levels(y_test)
+
+levels_common <- union(levels(pred), levels(y_test))
+pred <- factor(pred, levels = levels_common)
+y_test <- factor(y_test, levels = levels_common)
+
+#confusion matrix - FULL model
+conf_matrix <- confusionMatrix(pred, y_test)
+print(conf_matrix)
+
+```
+sensitivity/specificity for PC5 model
+```{r}
+print(metrics_pc5$by_class)  #sensitivity/specificity for PC5 model
+
+pred_pc5_class <- factor(pred_pc5_class, levels = levels(y_test))
+
+#confusion matrix
+conf_matrix_pca5 <- confusionMatrix(pred_pc5_class, y_test)
+print(conf_matrix_pca5)
+```
+
+sensitivity/specificity for PC33 model
+```{r}
+print(metrics_pc5$by_class)  #sensitivity/specificity for PC33 model
+pred_pc33_class <- factor(pred_pc33_class, levels = levels(y_test))
+
+#confusion matrix
+conf_matrix_pca33 <- confusionMatrix(pred_pc33_class, y_test)
+print(conf_matrix_pca33)
+```
+
+sensitivity/specificity for Full model
+```{r}
+print(metrics_full_glm$by_class)   #sensitivity/specificity for Full model
+```
+
+
+AUC
+```{r}
+#function to convert probs to matrices 
+get_prob_mat <- function(prob) {
+  if (length(dim(prob)) == 3) {
+    prob <- prob[, , 1]  
+  }
+  as.matrix(prob)
+}
+
+compute_macro_auc <- function(truth, prob_mat) {
+  truth <- factor(truth)
+  prob_mat <- as.matrix(prob_mat)
+  classes <- levels(truth)
+  K <- length(classes)
+  auc_per_class <- numeric(K)
+  names(auc_per_class) <- classes
+  
+  for (k in seq_len(K)) {
+    cls <- classes[k]
+    roc_obj <- roc(response = as.numeric(truth == cls), predictor = prob_mat[, k], quiet = TRUE)
+    auc_per_class[k] <- as.numeric(auc(roc_obj))
+  }
+  
+  list(auc_by_cls = auc_per_class, macro_auc  = mean(auc_per_class, na.rm = TRUE))
+}
+
+#Convert predicted probabilities to matrices
+prob_pc5_mat<- get_prob_mat(pred_pc5_prob)
+prob_pc33_mat <- get_prob_mat(pred_pc33_prob)
+prob_full_mat <- get_prob_mat(pred_full_prob)
+
+#compute AUCs
+auc_pc5 <- compute_macro_auc(pc5_test$label, prob_pc5_mat)
+auc_pc33 <- compute_macro_auc(pc33_test$label, prob_pc33_mat)
+auc_full <- compute_macro_auc(y_test, prob_full_mat)
+
+print(paste("PC5 total AUC is", round(auc_pc5$macro_auc, 2)))
+print(paste("PC33 total AUC is", round(auc_pc33$macro_auc, 2)))
+print(paste("Full model's total AUC is", round(auc_full$macro_auc, 2)))
+```
+
+AUC per genre - PC5 model
+```{r}
+round(auc_pc5$auc_by_cls, 2) #AUC per genre for PC5 model
+auc_table_5 <- data.frame(genre = names(auc_pc5$auc_by_cls), AUC = round(unname(auc_pc5$auc_by_cls), 2))
+
+print(auc_table_5)
+```
+
+AUC per genre - PC33 model
+```{r}
+round(auc_pc33$auc_by_cls, 2)  #AUC per genre for PC33 model
+auc_table_33 <- data.frame(genre = names(auc_pc33$auc_by_cls), AUC = round(unname(auc_pc33$auc_by_cls), 2))
+
+print(auc_table_33)
+```
+
+AUC per genre - full model
+```{r}
+round(auc_full$auc_by_cls, 2)  #AUC per genre for full model
+auc_table <- data.frame(genre = names(auc_full$auc_by_cls), AUC = round(unname(auc_full$auc_by_cls), 2))
+
+print(auc_table)
+```
+
