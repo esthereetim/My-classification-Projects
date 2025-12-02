@@ -1,5 +1,5 @@
 ---
-title: "groupproject841"
+title: "Music Classification"
 output: pdf_document
 date: "2025-11-18"
 ---
